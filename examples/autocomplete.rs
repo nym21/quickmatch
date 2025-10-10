@@ -5,22 +5,22 @@ fn main() {
     println!("=== QuickMatch Autocomplete Demo ===\n");
 
     let products = vec![
-        "Apple iPhone 15 Pro",
-        "Apple MacBook Pro 16",
-        "Apple AirPods Pro",
-        "Samsung Galaxy S24",
-        "Samsung Galaxy Tab",
-        "Sony PlayStation 5",
+        // "Apple iPhone 15 Pro",
+        // "Apple MacBook Pro 16",
+        // "Apple AirPods Pro",
+        // "Samsung Galaxy S24",
+        // "Samsung Galaxy Tab",
+        // "Sony PlayStation 5",
         "Sony WH-1000XM5 Headphones",
-        "Microsoft Surface Pro",
-        "Microsoft Xbox Series X",
-        "Dell XPS 13 Laptop",
-        "Dell UltraSharp Monitor",
-        "Logitech MX Master Mouse",
-        "Logitech Mechanical Keyboard",
-        "Canon EOS R5 Camera",
-        "Nikon Z9 Camera",
-        "GoPro Hero 12",
+        // "Microsoft Surface Pro",
+        // "Microsoft Xbox Series X",
+        // "Dell XPS 13 Laptop",
+        // "Dell UltraSharp Monitor",
+        // "Logitech MX Master Mouse",
+        // "Logitech Mechanical Keyboard",
+        // "Canon EOS R5 Camera",
+        // "Nikon Z9 Camera",
+        // "GoPro Hero 12",
     ]
     .into_iter()
     .map(|s| s.to_lowercase())
