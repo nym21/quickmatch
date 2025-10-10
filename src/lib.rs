@@ -4,7 +4,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 const MAX_TRIGRAMS: usize = 9;
 
-pub struct NgramSearcher<'a> {
+pub struct QuickMatch<'a> {
     max_word_count: usize,
     max_word_len: usize,
     max_query_len: usize,
@@ -13,12 +13,12 @@ pub struct NgramSearcher<'a> {
     _phantom: PhantomData<&'a str>,
 }
 
-unsafe impl<'a> Send for NgramSearcher<'a> {}
-unsafe impl<'a> Sync for NgramSearcher<'a> {}
+unsafe impl<'a> Send for QuickMatch<'a> {}
+unsafe impl<'a> Sync for QuickMatch<'a> {}
 
 const SEPARATORS: &[char] = &['_', '-', ' '];
 
-impl<'a> NgramSearcher<'a> {
+impl<'a> QuickMatch<'a> {
     pub fn new(items: &[&'a str]) -> Self {
         let mut word_index: FxHashMap<String, FxHashSet<*const str>> = FxHashMap::default();
         let mut trigram_index: FxHashMap<[char; 3], FxHashSet<*const str>> = FxHashMap::default();
