@@ -1,0 +1,22 @@
+[package]
+name = "quickmatch"
+description = "Lightning-fast fuzzy string matching with hybrid word and trigram indexing"
+version = "0.1.0"
+license = "MIT"
+edition = "2024"
+package.repository = "https://github.com/nym21/quickmatch"
+keywords = ["search", "fuzzy", "matching", "trigram", "autocomplete"]
+categories = ["algorithms", "text-processing", "data-structures"]
+
+[profile.clippy]
+inherits = "dev"
+lto = "off"
+codegen-units = 256
+opt-level = 0
+debug = false
+overflow-checks = false
+panic = "abort"
+debug-assertions = false
+
+[dependencies]
+rustc-hash = "2.1.1"
