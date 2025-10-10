@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ops::Neg, ptr};
+use std::{marker::PhantomData, ptr};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -19,6 +19,7 @@ unsafe impl<'a> Sync for Matcher<'a> {}
 const SEPARATORS: &[char] = &['_', '-', ' '];
 
 impl<'a> Matcher<'a> {
+    /// Expect the items to be pre-formatted (lowercase)
     pub fn new(items: &[&'a str]) -> Self {
         let mut word_index: FxHashMap<String, FxHashSet<*const str>> = FxHashMap::default();
         let mut trigram_index: FxHashMap<[char; 3], FxHashSet<*const str>> = FxHashMap::default();
@@ -62,7 +63,7 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    pub fn r#match(&self, query: &str, limit: usize) -> Vec<&'a str> {
+    pub fn matches(&self, query: &str, limit: usize) -> Vec<&'a str> {
         let query_lower = query.to_lowercase();
         let query_len = query_lower.len();
 
@@ -93,7 +94,7 @@ impl<'a> Matcher<'a> {
         }
 
         if !words_to_intersect.is_empty() {
-            words_to_intersect.sort_unstable_by_key(|set| (set.len() as i64).neg());
+            words_to_intersect.sort_unstable_by_key(|set| -(set.len() as i64));
 
             let mut intersect = words_to_intersect.pop().cloned().unwrap();
 
@@ -124,7 +125,6 @@ impl<'a> Matcher<'a> {
             return results;
         }
 
-        // Score candidates
         let mut scores: FxHashMap<*const str, usize> = FxHashMap::default();
         scores.reserve(256);
         if let Some(pool) = &pool {
@@ -169,13 +169,11 @@ impl<'a> Matcher<'a> {
                     }
                 }
 
-                // Slide window
                 a = b;
                 b = c;
             }
         }
 
-        // Filter by minimum score
         let min_score = trigram_count.div_ceil(2);
         let mut results: Vec<_> = scores
             .into_iter()

@@ -17,9 +17,6 @@ A high-performance string matching library optimized for interactive search expe
 
 ## Installation
 
-Add this to your `Cargo.toml`:
-
 ```toml
-[dependencies]
-quickmatch = "0.1"
+cargo add quickmatch
 ```
