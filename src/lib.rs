@@ -4,7 +4,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 const MAX_TRIGRAMS: usize = 9;
 
-pub struct QuickMatch<'a> {
+pub struct Matcher<'a> {
     max_word_count: usize,
     max_word_len: usize,
     max_query_len: usize,
@@ -13,12 +13,12 @@ pub struct QuickMatch<'a> {
     _phantom: PhantomData<&'a str>,
 }
 
-unsafe impl<'a> Send for QuickMatch<'a> {}
-unsafe impl<'a> Sync for QuickMatch<'a> {}
+unsafe impl<'a> Send for Matcher<'a> {}
+unsafe impl<'a> Sync for Matcher<'a> {}
 
 const SEPARATORS: &[char] = &['_', '-', ' '];
 
-impl<'a> QuickMatch<'a> {
+impl<'a> Matcher<'a> {
     pub fn new(items: &[&'a str]) -> Self {
         let mut word_index: FxHashMap<String, FxHashSet<*const str>> = FxHashMap::default();
         let mut trigram_index: FxHashMap<[char; 3], FxHashSet<*const str>> = FxHashMap::default();
@@ -62,7 +62,7 @@ impl<'a> QuickMatch<'a> {
         }
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Vec<&'a str> {
+    pub fn r#match(&self, query: &str, limit: usize) -> Vec<&'a str> {
         let query_lower = query.to_lowercase();
         let query_len = query_lower.len();
 
