@@ -1,5 +1,6 @@
-use quickmatch::Matcher;
 use std::io::{self, Write};
+
+use quickmatch::QuickMatch;
 
 fn main() {
     let products = vec![
@@ -26,7 +27,7 @@ fn main() {
 
     let products_ref = products.iter().map(|s| s.as_str()).collect::<Vec<_>>();
 
-    let matcher = Matcher::new(&products_ref);
+    let matcher = QuickMatch::new(&products_ref);
 
     println!("Type to search (press Ctrl+C to exit):");
     println!("Try: 'apple', 'pro', 'laptop', 'headphones', etc.\n");
@@ -43,7 +44,7 @@ fn main() {
             continue;
         }
 
-        let results = matcher.matches(query, usize::MAX);
+        let results = matcher.matches(query);
 
         if results.is_empty() {
             println!("  No matches found\n");

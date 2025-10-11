@@ -2,9 +2,8 @@ use std::{marker::PhantomData, ptr};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-const MAX_TRIGRAMS: usize = 9;
-
-pub struct Matcher<'a> {
+pub struct QuickMatch<'a> {
+    config: QuickMatchConfig,
     max_word_count: usize,
     max_word_len: usize,
     max_query_len: usize,
@@ -13,14 +12,17 @@ pub struct Matcher<'a> {
     _phantom: PhantomData<&'a str>,
 }
 
-unsafe impl<'a> Send for Matcher<'a> {}
-unsafe impl<'a> Sync for Matcher<'a> {}
+unsafe impl<'a> Send for QuickMatch<'a> {}
+unsafe impl<'a> Sync for QuickMatch<'a> {}
 
-const SEPARATORS: &[char] = &['_', '-', ' '];
-
-impl<'a> Matcher<'a> {
+impl<'a> QuickMatch<'a> {
     /// Expect the items to be pre-formatted (lowercase)
     pub fn new(items: &[&'a str]) -> Self {
+        Self::new_with(items, QuickMatchConfig::default())
+    }
+
+    /// Expect the items to be pre-formatted (lowercase)
+    pub fn new_with(items: &[&'a str], config: QuickMatchConfig) -> Self {
         let mut word_index: FxHashMap<String, FxHashSet<*const str>> = FxHashMap::default();
         let mut trigram_index: FxHashMap<[char; 3], FxHashSet<*const str>> = FxHashMap::default();
         let mut max_word_len = 0;
@@ -30,7 +32,7 @@ impl<'a> Matcher<'a> {
         for &item in items {
             max_query_len = max_query_len.max(item.len());
             let mut word_count = 0;
-            for word in item.split(SEPARATORS) {
+            for word in item.split(config.separators) {
                 word_count += 1;
                 if word.is_empty() {
                     continue;
@@ -59,20 +61,42 @@ impl<'a> Matcher<'a> {
             max_word_count: max_word_len + 2,
             word_index,
             trigram_index,
+            config,
             _phantom: PhantomData,
         }
     }
 
-    pub fn matches(&self, query: &str, limit: usize) -> Vec<&'a str> {
-        let query_lower = query.to_lowercase();
-        let query_len = query_lower.len();
+    ///
+    /// `limit`: max number of returned matches
+    ///
+    /// `max_trigrams`: max number of processed trigrams in unknown words (0-10 recommended)
+    ///
+    pub fn matches(&self, query: &str) -> Vec<&'a str> {
+        self.matches_with(query, &self.config)
+    }
 
-        if query.is_empty() || query_len > self.max_query_len {
+    ///
+    /// `limit`: max number of returned matches
+    ///
+    /// `max_trigrams`: max number of processed trigrams in unknown words (0-10 recommended)
+    ///
+    pub fn matches_with(&self, query: &str, config: &QuickMatchConfig) -> Vec<&'a str> {
+        let limit = config.limit;
+        let trigram_budget = config.trigram_budget;
+        let query_len = query.len();
+
+        if limit == 0 || query.is_empty() || query_len > self.max_query_len {
             return vec![];
         }
 
-        let words: FxHashSet<&str> = query_lower
-            .split(SEPARATORS)
+        let query = query
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let words: FxHashSet<&str> = query
+            .split(config.separators)
             .filter(|w| !w.is_empty() && w.len() <= self.max_word_len)
             .collect();
 
@@ -87,9 +111,10 @@ impl<'a> Matcher<'a> {
 
         let mut words_to_intersect = vec![];
         for word in words {
-            match self.word_index.get(word) {
-                Some(items) => words_to_intersect.push(items),
-                None => unknown_words.push(word),
+            if let Some(items) = self.word_index.get(word) {
+                words_to_intersect.push(items)
+            } else if word.len() >= 3 && unknown_words.len() < trigram_budget {
+                unknown_words.push(word.chars().collect::<Vec<_>>())
             }
         }
 
@@ -109,7 +134,11 @@ impl<'a> Matcher<'a> {
         }
         let some_pool = pool.is_some();
 
-        if some_pool && unknown_words.is_empty() {
+        if unknown_words.is_empty() {
+            if !some_pool {
+                return vec![];
+            }
+
             let mut results: Vec<_> = pool
                 .unwrap()
                 .into_iter()
@@ -122,6 +151,7 @@ impl<'a> Matcher<'a> {
             }
 
             results.sort_unstable_by_key(|item| item.len());
+
             return results;
         }
 
@@ -132,30 +162,58 @@ impl<'a> Matcher<'a> {
                 scores.insert(item, 1);
             }
         }
+
         let mut trigram_count = 0;
-        'outer: for word in unknown_words {
-            if word.len() < 3 || trigram_count >= MAX_TRIGRAMS {
-                continue;
-            }
+        let mut visited: FxHashSet<[char; 3]> = FxHashSet::default();
 
-            let mut chars = word.chars();
-            let mut a = chars.next().unwrap();
-            let mut b = chars.next().unwrap();
+        'outer: for round in 0..trigram_budget {
+            let mut processed_trigrams = false;
 
-            for c in chars {
-                if trigram_count >= MAX_TRIGRAMS {
+            for chars in &unknown_words {
+                if trigram_count >= trigram_budget {
                     break 'outer;
                 }
-                trigram_count += 1;
 
-                let trigram = [a, b, c];
+                let len = chars.len();
+                let max_pos = len - 3;
 
-                a = b;
-                b = c;
+                let pos = if round == 0 {
+                    0
+                } else if round == 1 && max_pos > 0 {
+                    max_pos
+                } else if round == 2 && max_pos > 1 {
+                    max_pos / 2
+                } else if max_pos > 2 {
+                    // Alternate left and right of middle
+                    let mid = max_pos / 2;
+                    let offset = (round - 2) >> 1; // Faster than / 2
+                    let p = if (round & 1) == 1 {
+                        // Faster than (r - 3) % 2 == 0
+                        mid.saturating_sub(offset)
+                    } else {
+                        mid + offset
+                    };
+
+                    if p == 0 || p >= max_pos || p == mid {
+                        continue;
+                    }
+                    p
+                } else {
+                    continue;
+                };
+
+                let trigram = [chars[pos], chars[pos + 1], chars[pos + 2]];
+
+                if !visited.insert(trigram) {
+                    continue;
+                }
 
                 let Some(items) = self.trigram_index.get(&trigram) else {
                     continue;
                 };
+
+                processed_trigrams = true;
+                trigram_count += 1;
 
                 if some_pool {
                     for &item in items {
@@ -172,9 +230,13 @@ impl<'a> Matcher<'a> {
                     }
                 }
             }
+
+            if !processed_trigrams {
+                break 'outer;
+            }
         }
 
-        let min_score = trigram_count.div_ceil(2);
+        let min_score = trigram_count.div_ceil(2).max(1);
         let mut results: Vec<_> = scores
             .into_iter()
             .filter(|(_, s)| *s >= min_score)
@@ -195,5 +257,74 @@ impl<'a> Matcher<'a> {
             .take(limit)
             .map(|(item, _)| item)
             .collect()
+    }
+}
+
+const DEFAULT_SEPARATORS: &[char] = &['_', '-', ' '];
+const DEFAULT_TRIGRAM_BUDGET: usize = 6;
+const DEFAULT_LIMIT: usize = 100;
+
+pub struct QuickMatchConfig {
+    /// Separators used to split words.
+    ///
+    /// Default: ['_', '-', ' ']
+    separators: &'static [char],
+    /// Maximum number of results to return.
+    ///
+    /// Default: 100
+    /// - Min: 1
+    /// - Max: No hard limit (but large values may impact performance)
+    limit: usize,
+    /// Budget of trigrams to process from unknown words.
+    /// This budget is distributed fairly across all unknown words.
+    ///
+    /// Default: 6 (recommended: 3-9)
+    /// - 0: Disable trigram matching (only exact word matches)
+    /// - Low (3-6): Faster, less accurate fuzzy matching
+    /// - High (9-15): Slower, more accurate fuzzy matching
+    /// - Max: 20
+    trigram_budget: usize,
+}
+
+impl Default for QuickMatchConfig {
+    fn default() -> Self {
+        Self {
+            separators: DEFAULT_SEPARATORS,
+            limit: DEFAULT_LIMIT,
+            trigram_budget: DEFAULT_TRIGRAM_BUDGET,
+        }
+    }
+}
+
+impl QuickMatchConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit.max(1);
+        self
+    }
+
+    pub fn with_trigram_budget(mut self, trigram_budget: usize) -> Self {
+        self.trigram_budget = trigram_budget.clamp(0, 20);
+        self
+    }
+
+    pub fn with_separators(mut self, separators: &'static [char]) -> Self {
+        self.separators = separators;
+        self
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub fn trigram_budget(&self) -> usize {
+        self.trigram_budget
+    }
+
+    pub fn separators(&self) -> &[char] {
+        self.separators
     }
 }
