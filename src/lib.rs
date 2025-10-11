@@ -135,12 +135,8 @@ impl<'a> QuickMatch<'a> {
         let some_pool = pool.is_some();
 
         if unknown_words.is_empty() || trigram_budget == 0 {
-            if !some_pool {
-                return vec![];
-            }
-
             let mut results: Vec<_> = pool
-                .unwrap()
+                .unwrap_or_default()
                 .into_iter()
                 .map(|item| unsafe { &*item as &str })
                 .collect();
