@@ -85,7 +85,7 @@ impl<'a> QuickMatch<'a> {
         let trigram_budget = config.trigram_budget;
         let query_len = query.len();
 
-        if limit == 0 || query.is_empty() || query_len > self.max_query_len {
+        if query.is_empty() || query_len > self.max_query_len {
             return vec![];
         }
 
@@ -134,7 +134,7 @@ impl<'a> QuickMatch<'a> {
         }
         let some_pool = pool.is_some();
 
-        if unknown_words.is_empty() {
+        if unknown_words.is_empty() || trigram_budget == 0 {
             if !some_pool {
                 return vec![];
             }
