@@ -133,7 +133,6 @@ impl<'a> Matcher<'a> {
             }
         }
         let mut trigram_count = 0;
-        dbg!(&unknown_words, &self.trigram_index);
         'outer: for word in unknown_words {
             if word.len() < 3 || trigram_count >= MAX_TRIGRAMS {
                 continue;
@@ -176,7 +175,6 @@ impl<'a> Matcher<'a> {
         }
 
         let min_score = trigram_count.div_ceil(2);
-        dbg!(&scores, min_score);
         let mut results: Vec<_> = scores
             .into_iter()
             .filter(|(_, s)| *s >= min_score)

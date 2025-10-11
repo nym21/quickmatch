@@ -17,6 +17,6 @@ A high-performance string matching library optimized for interactive search expe
 
 ## Installation
 
-```toml
+```bash
 cargo add quickmatch
 ```
