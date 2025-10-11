@@ -1,10 +1,10 @@
 [package]
 name = "quickmatch"
 description = "Lightning-fast fuzzy string matching with hybrid word and trigram indexing"
-version = "0.1.5"
+version = "0.1.6"
 license = "MIT"
 edition = "2024"
-package.repository = "https://github.com/nym21/quickmatch"
+repository = "https://github.com/nym21/quickmatch"
 keywords = ["search", "fuzzy", "matching", "trigram", "autocomplete"]
 categories = ["algorithms", "text-processing", "data-structures"]
 
