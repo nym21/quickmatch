@@ -2,6 +2,10 @@ use std::{marker::PhantomData, ptr};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+mod config;
+
+pub use config::*;
+
 pub struct QuickMatch<'a> {
     config: QuickMatchConfig,
     max_word_count: usize,
@@ -28,11 +32,12 @@ impl<'a> QuickMatch<'a> {
         let mut max_word_len = 0;
         let mut max_query_len = 0;
         let mut max_words = 0;
+        let separators = config.separators();
 
         for &item in items {
             max_query_len = max_query_len.max(item.len());
             let mut word_count = 0;
-            for word in item.split(config.separators) {
+            for word in item.split(separators) {
                 word_count += 1;
                 if word.is_empty() {
                     continue;
@@ -81,8 +86,8 @@ impl<'a> QuickMatch<'a> {
     /// `max_trigrams`: max number of processed trigrams in unknown words (0-10 recommended)
     ///
     pub fn matches_with(&self, query: &str, config: &QuickMatchConfig) -> Vec<&'a str> {
-        let limit = config.limit;
-        let trigram_budget = config.trigram_budget;
+        let limit = config.limit();
+        let trigram_budget = config.trigram_budget();
         let query_len = query.len();
 
         if query.is_empty() || query_len > self.max_query_len {
@@ -95,10 +100,11 @@ impl<'a> QuickMatch<'a> {
             .filter(|c| c.is_ascii())
             .collect::<String>()
             .to_ascii_lowercase();
-        let words: FxHashSet<&str> = query
-            .split(config.separators)
+
+        let words = query
+            .split(config.separators())
             .filter(|w| !w.is_empty() && w.len() <= self.max_word_len)
-            .collect();
+            .collect::<FxHashSet<_>>();
 
         if words.is_empty() || words.len() > self.max_word_count {
             return vec![];
@@ -253,74 +259,5 @@ impl<'a> QuickMatch<'a> {
             .take(limit)
             .map(|(item, _)| item)
             .collect()
-    }
-}
-
-const DEFAULT_SEPARATORS: &[char] = &['_', '-', ' '];
-const DEFAULT_TRIGRAM_BUDGET: usize = 6;
-const DEFAULT_LIMIT: usize = 100;
-
-pub struct QuickMatchConfig {
-    /// Separators used to split words.
-    ///
-    /// Default: ['_', '-', ' ']
-    separators: &'static [char],
-    /// Maximum number of results to return.
-    ///
-    /// Default: 100
-    /// - Min: 1
-    /// - Max: No hard limit (but large values may impact performance)
-    limit: usize,
-    /// Budget of trigrams to process from unknown words.
-    /// This budget is distributed fairly across all unknown words.
-    ///
-    /// Default: 6 (recommended: 3-9)
-    /// - 0: Disable trigram matching (only exact word matches)
-    /// - Low (3-6): Faster, less accurate fuzzy matching
-    /// - High (9-15): Slower, more accurate fuzzy matching
-    /// - Max: 20
-    trigram_budget: usize,
-}
-
-impl Default for QuickMatchConfig {
-    fn default() -> Self {
-        Self {
-            separators: DEFAULT_SEPARATORS,
-            limit: DEFAULT_LIMIT,
-            trigram_budget: DEFAULT_TRIGRAM_BUDGET,
-        }
-    }
-}
-
-impl QuickMatchConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = limit.max(1);
-        self
-    }
-
-    pub fn with_trigram_budget(mut self, trigram_budget: usize) -> Self {
-        self.trigram_budget = trigram_budget.clamp(0, 20);
-        self
-    }
-
-    pub fn with_separators(mut self, separators: &'static [char]) -> Self {
-        self.separators = separators;
-        self
-    }
-
-    pub fn limit(&self) -> usize {
-        self.limit
-    }
-
-    pub fn trigram_budget(&self) -> usize {
-        self.trigram_budget
-    }
-
-    pub fn separators(&self) -> &[char] {
-        self.separators
     }
 }
