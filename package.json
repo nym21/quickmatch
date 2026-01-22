@@ -1,0 +1,25 @@
+{
+  "name": "quickmatch-js",
+  "version": "0.2.1",
+  "description": "Lightning-fast fuzzy string matching",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "keywords": [
+    "fuzzy",
+    "search",
+    "autocomplete",
+    "trigram",
+    "matching"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nym21/quickmatch.git"
+  }
+}

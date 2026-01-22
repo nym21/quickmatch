@@ -165,14 +165,13 @@ impl<'a> QuickMatch<'a> {
             }
         }
 
-        let mut trigram_count = 0;
+        let mut budget = trigram_budget;
+        let mut hit_count: usize = 0;
         let mut visited: FxHashSet<[char; 3]> = FxHashSet::default();
 
         'outer: for round in 0..trigram_budget {
-            let mut processed_trigrams = false;
-
             for chars in &unknown_words {
-                if trigram_count >= trigram_budget {
+                if budget == 0 {
                     break 'outer;
                 }
 
@@ -186,11 +185,9 @@ impl<'a> QuickMatch<'a> {
                 } else if round == 2 && max_pos > 1 {
                     max_pos / 2
                 } else if max_pos > 2 {
-                    // Alternate left and right of middle
                     let mid = max_pos / 2;
-                    let offset = (round - 2) >> 1; // Faster than / 2
+                    let offset = (round - 2) >> 1;
                     let p = if (round & 1) == 1 {
-                        // Faster than (r - 3) % 2 == 0
                         mid.saturating_sub(offset)
                     } else {
                         mid + offset
@@ -210,12 +207,13 @@ impl<'a> QuickMatch<'a> {
                     continue;
                 }
 
+                budget -= 1;
+
                 let Some(items) = self.trigram_index.get(&trigram) else {
                     continue;
                 };
 
-                processed_trigrams = true;
-                trigram_count += 1;
+                hit_count += 1;
 
                 if some_pool {
                     for &item in items {
@@ -232,13 +230,9 @@ impl<'a> QuickMatch<'a> {
                     }
                 }
             }
-
-            if !processed_trigrams {
-                break 'outer;
-            }
         }
 
-        let min_score = trigram_count.div_ceil(2).max(1);
+        let min_score = hit_count.div_ceil(2).max(1);
         let mut results: Vec<_> = scores
             .into_iter()
             .filter(|(_, s)| *s >= min_score)

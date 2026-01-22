@@ -18,5 +18,9 @@ A high-performance string matching library optimized for interactive search expe
 ## Installation
 
 ```bash
+# rust
 cargo add quickmatch
+
+# js
+npm install quickmatch-js
 ```
