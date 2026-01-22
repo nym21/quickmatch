@@ -1,6 +1,6 @@
 {
   "name": "quickmatch-js",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Lightning-fast fuzzy string matching",
   "type": "module",
   "main": "src/index.js",
