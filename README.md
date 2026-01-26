@@ -1,6 +1,6 @@
 # quickmatch
 
-**Lightning-fast fuzzy string matching for Rust.**
+**Lightning-fast fuzzy string matching for Rust and Javascript.**
 
 A high-performance string matching library optimized for interactive search experiences like autocomplete, command palettes, and search-as-you-type interfaces.
 
