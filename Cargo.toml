@@ -2,6 +2,7 @@
 name = "quickmatch"
 description = "Lightning-fast fuzzy string matching with hybrid word and trigram indexing"
 version = "0.3.1"
+readme = "docs/README.md"
 license = "MIT"
 edition = "2024"
 repository = "https://github.com/nym21/quickmatch"
