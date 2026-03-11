@@ -1,11 +1,11 @@
-const DEFAULT_SEPARATORS: &[char] = &['_', '-', ' '];
+const DEFAULT_SEPARATORS: &[char] = &['_', '-', ' ', ':', '/'];
 const DEFAULT_TRIGRAM_BUDGET: usize = 6;
 const DEFAULT_LIMIT: usize = 100;
 
 pub struct QuickMatchConfig {
     /// Separators used to split words.
     ///
-    /// Default: ['_', '-', ' ']
+    /// Default: ['_', '-', ' ', ':', '/']
     separators: &'static [char],
     /// Maximum number of results to return.
     ///

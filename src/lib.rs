@@ -36,16 +36,16 @@ impl<'a> QuickMatch<'a> {
 
         for &item in items {
             max_query_len = max_query_len.max(item.len());
-            let mut word_count = 0;
-            for word in item.split(separators) {
-                word_count += 1;
-                if word.is_empty() {
-                    continue;
-                }
+            let item_words: Vec<&str> = item.split(separators).filter(|w| !w.is_empty()).collect();
+            max_words = max_words.max(item_words.len());
 
-                max_word_len = max_word_len.max(item.len());
+            for word in &item_words {
+                max_word_len = max_word_len.max(word.len());
 
-                word_index.entry(word.to_string()).or_default().insert(item);
+                word_index
+                    .entry(word.to_string())
+                    .or_default()
+                    .insert(item);
 
                 if word.len() >= 3 {
                     let chars = word.chars().collect::<Vec<_>>();
@@ -57,13 +57,18 @@ impl<'a> QuickMatch<'a> {
                     }
                 }
             }
-            max_words = max_words.max(word_count);
+
+            // Index adjacent word pairs as compounds (e.g. "hash"+"rate" → "hashrate")
+            for pair in item_words.windows(2) {
+                let compound = format!("{}{}", pair[0], pair[1]);
+                word_index.entry(compound).or_default().insert(item);
+            }
         }
 
         Self {
             max_query_len: max_query_len + 6,
             max_word_len: max_word_len + 4,
-            max_word_count: max_word_len + 2,
+            max_word_count: max_words + 2,
             word_index,
             trigram_index,
             config,
@@ -71,26 +76,15 @@ impl<'a> QuickMatch<'a> {
         }
     }
 
-    ///
-    /// `limit`: max number of returned matches
-    ///
-    /// `max_trigrams`: max number of processed trigrams in unknown words (0-10 recommended)
-    ///
     pub fn matches(&self, query: &str) -> Vec<&'a str> {
         self.matches_with(query, &self.config)
     }
 
-    ///
-    /// `limit`: max number of returned matches
-    ///
-    /// `max_trigrams`: max number of processed trigrams in unknown words (0-10 recommended)
-    ///
     pub fn matches_with(&self, query: &str, config: &QuickMatchConfig) -> Vec<&'a str> {
         let limit = config.limit();
         let trigram_budget = config.trigram_budget();
-        let query_len = query.len();
 
-        if query.is_empty() || query_len > self.max_query_len {
+        if query.is_empty() {
             return vec![];
         }
 
@@ -101,22 +95,30 @@ impl<'a> QuickMatch<'a> {
             .collect::<String>()
             .to_ascii_lowercase();
 
-        let words = query
-            .split(config.separators())
+        if query.is_empty() || query.len() > self.max_query_len {
+            return vec![];
+        }
+
+        let separators = config.separators();
+
+        let query_words: Vec<&str> = query
+            .split(separators)
             .filter(|w| !w.is_empty() && w.len() <= self.max_word_len)
-            .collect::<FxHashSet<_>>();
+            .collect();
+
+        let words: FxHashSet<&str> = query_words.iter().copied().collect();
 
         if words.is_empty() || words.len() > self.max_word_count {
             return vec![];
         }
 
-        let min_len = query_len.saturating_sub(3);
+        let min_len = query.len().saturating_sub(3);
 
         let mut pool: Option<FxHashSet<*const str>> = None;
         let mut unknown_words = Vec::new();
 
         let mut words_to_intersect = vec![];
-        for word in words {
+        for &word in &words {
             if let Some(items) = self.word_index.get(word) {
                 words_to_intersect.push(items)
             } else if word.len() >= 3 && unknown_words.len() < trigram_budget {
@@ -144,17 +146,23 @@ impl<'a> QuickMatch<'a> {
             let mut results: Vec<_> = pool
                 .unwrap_or_default()
                 .into_iter()
-                .map(|item| unsafe { &*item as &str })
+                .map(|item| {
+                    let s = unsafe { &*item as &str };
+                    (s, prefix_score(s, &query_words, separators))
+                })
                 .collect();
 
+            let cmp =
+                |a: &(&str, u8), b: &(&str, u8)| b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len()));
+
             if results.len() > limit {
-                results.select_nth_unstable_by_key(limit, |item| item.len());
+                results.select_nth_unstable_by(limit, cmp);
                 results.truncate(limit);
             }
 
-            results.sort_unstable_by_key(|item| item.len());
+            results.sort_unstable_by(cmp);
 
-            return results;
+            return results.into_iter().map(|(item, _)| item).collect();
         }
 
         let mut scores: FxHashMap<*const str, usize> = FxHashMap::default();
@@ -236,22 +244,48 @@ impl<'a> QuickMatch<'a> {
         let mut results: Vec<_> = scores
             .into_iter()
             .filter(|(_, s)| *s >= min_score)
-            .map(|(item, score)| (unsafe { &*item as &str }, score))
+            .map(|(item, score)| {
+                let s = unsafe { &*item as &str };
+                (s, score, prefix_score(s, &query_words, separators))
+            })
             .collect();
 
+        let cmp = |a: &(&str, usize, u8), b: &(&str, usize, u8)| {
+            b.2.cmp(&a.2)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.0.len().cmp(&b.0.len()))
+        };
+
         if results.len() > limit {
-            results.select_nth_unstable_by(limit, |a, b| {
-                b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len()))
-            });
+            results.select_nth_unstable_by(limit, cmp);
             results.truncate(limit);
         }
 
-        results.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len())));
+        results.sort_unstable_by(cmp);
 
         results
             .into_iter()
             .take(limit)
-            .map(|(item, _)| item)
+            .map(|(item, _, _)| item)
             .collect()
+    }
+}
+
+/// Score how well an item's word sequence matches the query as a prefix.
+/// - 2: exact match (all words match, no extra words in item)
+/// - 1: prefix match (item starts with query words but has more)
+/// - 0: no prefix match
+fn prefix_score(item: &str, query_words: &[&str], separators: &[char]) -> u8 {
+    let mut item_words = item.split(separators).filter(|w| !w.is_empty());
+    for &qw in query_words {
+        match item_words.next() {
+            Some(iw) if iw == qw => continue,
+            _ => return 0,
+        }
+    }
+    if item_words.next().is_none() {
+        2
+    } else {
+        1
     }
 }
