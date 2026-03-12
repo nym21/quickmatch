@@ -1,6 +1,7 @@
 const DEFAULT_SEPARATORS: &[char] = &['_', '-', ' ', ':', '/'];
 const DEFAULT_TRIGRAM_BUDGET: usize = 6;
 const DEFAULT_LIMIT: usize = 100;
+const DEFAULT_MIN_SCORE: usize = 2;
 
 pub struct QuickMatchConfig {
     /// Separators used to split words.
@@ -22,6 +23,12 @@ pub struct QuickMatchConfig {
     /// - High (9-15): Slower, more accurate fuzzy matching
     /// - Max: 20
     trigram_budget: usize,
+    /// Minimum trigram score required for fuzzy matches.
+    /// Higher values require more trigram overlap, reducing noise.
+    ///
+    /// Default: 2
+    /// - Min: 1
+    min_score: usize,
 }
 
 impl Default for QuickMatchConfig {
@@ -30,6 +37,7 @@ impl Default for QuickMatchConfig {
             separators: DEFAULT_SEPARATORS,
             limit: DEFAULT_LIMIT,
             trigram_budget: DEFAULT_TRIGRAM_BUDGET,
+            min_score: DEFAULT_MIN_SCORE,
         }
     }
 }
@@ -54,6 +62,11 @@ impl QuickMatchConfig {
         self
     }
 
+    pub fn with_min_score(mut self, min_score: usize) -> Self {
+        self.min_score = min_score.max(1);
+        self
+    }
+
     pub fn limit(&self) -> usize {
         self.limit
     }
@@ -64,5 +77,9 @@ impl QuickMatchConfig {
 
     pub fn separators(&self) -> &[char] {
         self.separators
+    }
+
+    pub fn min_score(&self) -> usize {
+        self.min_score
     }
 }

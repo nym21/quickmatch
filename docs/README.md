@@ -35,7 +35,7 @@ qm.matches("filenme");    // ["file_name", "file_size"]  (trigram fuzzy)
 // Custom config
 let config = QuickMatchConfig::new()
     .with_limit(5)
-    .with_trigrams(10)
+    .with_trigram_budget(10)
     .with_separators(&['_', '-', ' ']);
 let qm = QuickMatch::new_with(&items, config);
 ```
@@ -72,13 +72,14 @@ Results are ranked by prefix score (exact > prefix > unordered), then by trigram
 
 ## Config
 
-| Option | Rust | JS | Default | Description |
-|--------|------|-----|---------|-------------|
-| Limit | `with_limit(n)` | `withLimit(n)` | 100 | Max results returned |
-| Trigrams | `with_trigrams(n)` | `withTrigramBudget(n)` | 6 | Trigram budget for fuzzy matching (0-20). Higher = more fuzzy, slower |
-| Separators | `with_separators(&[..])` | `withSeparators(s)` | `_`, `-`, ` `, `:`, `/` | Characters that split words |
+All options are documented in the `QuickMatchConfig` source. Builder methods:
 
-Setting trigrams to `0` disables fuzzy matching entirely (exact word matches only).
+| Rust | JS | Default |
+|------|-----|---------|
+| `with_limit(n)` | `withLimit(n)` | 100 |
+| `with_trigram_budget(n)` | `withTrigramBudget(n)` | 6 |
+| `with_min_score(n)` | `withMinScore(n)` | 2 |
+| `with_separators(&[..])` | `withSeparators(s)` | `_- :/` |
 
 ## Performance
 

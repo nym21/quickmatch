@@ -1,35 +1,68 @@
 const DEFAULT_SEPARATORS = "_- :/";
 const DEFAULT_TRIGRAM_BUDGET = 6;
 const DEFAULT_LIMIT = 100;
+const DEFAULT_MIN_SCORE = 2;
 
 /**
  * Configuration for QuickMatch.
  */
 export class QuickMatchConfig {
-  /** @type {string} Characters used to split items into words */
+  /**
+   * Separators used to split words.
+   * @type {string}
+   * @default "_- :/"
+   */
   separators = DEFAULT_SEPARATORS;
 
-  /** @type {number} Maximum number of results to return */
+  /**
+   * Maximum number of results to return.
+   * @type {number}
+   * @default 100
+   */
   limit = DEFAULT_LIMIT;
 
-  /** @type {number} Number of trigram lookups for fuzzy matching (0-20) */
+  /**
+   * Budget of trigrams to process from unknown words.
+   * This budget is distributed fairly across all unknown words.
+   *
+   * - 0: Disable trigram matching (only exact word matches)
+   * - Low (3-6): Faster, less accurate fuzzy matching
+   * - High (9-15): Slower, more accurate fuzzy matching
+   * - Max: 20
+   * @type {number}
+   * @default 6
+   */
   trigramBudget = DEFAULT_TRIGRAM_BUDGET;
 
-  /** @param {number} n */
+  /**
+   * Minimum trigram score required for fuzzy matches.
+   * Higher values require more trigram overlap, reducing noise.
+   * @type {number}
+   * @default 2
+   */
+  minScore = DEFAULT_MIN_SCORE;
+
+  /** @param {number} n - Max results (default: 100, min: 1) */
   withLimit(n) {
     this.limit = Math.max(1, n);
     return this;
   }
 
-  /** @param {number} n - Budget (0-20, default: 6) */
+  /** @param {number} n - Trigram budget (0-20, default: 6) */
   withTrigramBudget(n) {
     this.trigramBudget = Math.max(0, Math.min(20, n));
     return this;
   }
 
-  /** @param {string} s - Separator characters (default: '_- ') */
+  /** @param {string} s - Separator characters (default: '_- :/') */
   withSeparators(s) {
     this.separators = s;
+    return this;
+  }
+
+  /** @param {number} n - Min trigram score (default: 2, min: 1) */
+  withMinScore(n) {
+    this.minScore = Math.max(1, n);
     return this;
   }
 }
@@ -144,7 +177,7 @@ export class QuickMatch {
       hasPool,
       Math.max(0, q.length - 3),
     );
-    const minScore = Math.max(1, Math.ceil(hitCount / 2));
+    const minScore = Math.max(config.minScore, Math.ceil(hitCount / 2));
     const result = this._rank(dirty, minScore, qwords, sep, limit);
 
     for (const i of dirty) scores[i] = 0;

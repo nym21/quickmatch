@@ -240,7 +240,7 @@ impl<'a> QuickMatch<'a> {
             }
         }
 
-        let min_score = hit_count.div_ceil(2).max(1);
+        let min_score = hit_count.div_ceil(2).max(config.min_score());
         let mut results: Vec<_> = scores
             .into_iter()
             .filter(|(_, s)| *s >= min_score)
