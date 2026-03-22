@@ -4,42 +4,26 @@ const DEFAULT_LIMIT = 100;
 const DEFAULT_MIN_SCORE = 2;
 
 /**
- * Configuration for QuickMatch.
+ * Search configuration.
+ *
+ * Defaults work well for most use cases.
+ * Tweak `trigramBudget` to trade speed for typo tolerance.
  */
 export class QuickMatchConfig {
-  /**
-   * Separators used to split words.
-   * @type {string}
-   * @default "_- :/"
-   */
+  /** Characters that separate words in items (e.g. "hash_rate" → ["hash", "rate"]).
+   * @type {string} */
   separators = DEFAULT_SEPARATORS;
 
-  /**
-   * Maximum number of results to return.
-   * @type {number}
-   * @default 100
-   */
+  /** Max results returned per query.
+   * @type {number} */
   limit = DEFAULT_LIMIT;
 
-  /**
-   * Budget of trigrams to process from unknown words.
-   * This budget is distributed fairly across all unknown words.
-   *
-   * - 0: Disable trigram matching (only exact word matches)
-   * - Low (3-6): Faster, less accurate fuzzy matching
-   * - High (9-15): Slower, more accurate fuzzy matching
-   * - Max: 20
-   * @type {number}
-   * @default 6
-   */
+  /** How hard to try matching typos (0 = off, 3–6 = fast, 9–15 = thorough, max 20).
+   * @type {number} */
   trigramBudget = DEFAULT_TRIGRAM_BUDGET;
 
-  /**
-   * Minimum trigram score required for fuzzy matches.
-   * Higher values require more trigram overlap, reducing noise.
-   * @type {number}
-   * @default 2
-   */
+  /** Min overlap required for a typo match. Higher = fewer false positives.
+   * @type {number} */
   minScore = DEFAULT_MIN_SCORE;
 
   /** @param {number} n - Max results (default: 100, min: 1) */
@@ -68,13 +52,14 @@ export class QuickMatchConfig {
 }
 
 /**
- * Fast fuzzy string matcher using word and trigram indexing.
+ * Instant search over a list of strings.
+ *
+ * Supports exact words, prefixes ("dom" → "dominance"), joined words
+ * ("hashrate" → "hash_rate"), and typo tolerance ("suply" → "supply").
+ * Results are ranked: exact matches first, then by specificity.
  */
 export class QuickMatch {
-  /**
-   * @param {string[]} items - Items to index (should be lowercase)
-   * @param {QuickMatchConfig} [config]
-   */
+  /** @param {string[]} items - Searchable items (lowercase) @param {QuickMatchConfig} [config] */
   constructor(items, config = new QuickMatchConfig()) {
     this.config = config;
     this.items = items;
@@ -105,14 +90,22 @@ export class QuickMatch {
           const word = item.slice(start, i);
           words.push(word);
           if (word.length > maxWordLen) maxWordLen = word.length;
-          addToIndex(this.wordIndex, word, idx);
-          indexTrigrams(this.trigramIndex, word, idx);
+          for (let len = 1; len <= word.length; len++) {
+            addToIndex(this.wordIndex, word.slice(0, len), idx);
+          }
+          for (let k = 0; k <= word.length - 3; k++) {
+            addToIndex(this.trigramIndex, word[k] + word[k + 1] + word[k + 2], idx);
+          }
         }
         start = i + 1;
       }
 
       for (let i = 0; i < words.length - 1; i++) {
-        addToIndex(this.wordIndex, words[i] + words[i + 1], idx);
+        const compound = words[i] + words[i + 1];
+        const from = words[i].length + 1;
+        for (let len = from; len <= compound.length; len++) {
+          addToIndex(this.wordIndex, compound.slice(0, len), idx);
+        }
       }
 
       if (words.length > maxWords) maxWords = words.length;
@@ -150,57 +143,58 @@ export class QuickMatch {
 
     for (const w of qwords) {
       const hits = this.wordIndex.get(w);
-      if (hits) known.push(hits);
-      else if (w.length >= 3 && unknown.length < trigramBudget) unknown.push(w);
-    }
-
-    const pool = intersect(known);
-    const hasPool = pool.length > 0;
-
-    if (!unknown.length || !trigramBudget) {
-      if (!hasPool) return [];
-      return this._rank(pool, null, qwords, sep, limit);
-    }
-
-    // Seed scores from exact-match pool
-    const { _scores: scores, _dirty: dirty } = this;
-    if (hasPool) {
-      for (const i of pool) {
-        scores[i] = 1;
-        dirty.push(i);
+      if (hits) {
+        known.push(hits);
+      } else if (w.length >= 3 && unknown.length < trigramBudget) {
+        unknown.push(w);
       }
     }
 
-    const hitCount = this._scoreTrigrams(
-      unknown,
-      trigramBudget,
-      hasPool,
-      Math.max(0, q.length - 3),
-    );
-    const minScore = Math.max(config.minScore, Math.ceil(hitCount / 2));
-    const result = this._rank(dirty, minScore, qwords, sep, limit);
+    const pool = intersect(known);
 
-    for (const i of dirty) scores[i] = 0;
-    dirty.length = 0;
-    return result;
+    // Try typo matching for unknown words
+    if (unknown.length && trigramBudget) {
+      const { _scores: scores, _dirty: dirty } = this;
+
+      if (pool) {
+        for (const i of pool) {
+          scores[i] = 1;
+          dirty.push(i);
+        }
+      }
+
+      const hitCount = this._scoreTrigrams(
+        unknown,
+        trigramBudget,
+        pool !== null,
+        Math.max(0, q.length - 3),
+      );
+      const minScore = Math.max(config.minScore, Math.ceil(hitCount / 2));
+      const result = this._rank(dirty, minScore, qwords, sep, limit);
+
+      for (const i of dirty) scores[i] = 0;
+      dirty.length = 0;
+
+      if (result.length > 0) return result;
+    }
+
+    // Rank known candidates (intersection, or union as fallback)
+    const candidates = pool || union(known);
+    return candidates.length > 0
+      ? this._rank(candidates, null, qwords, sep, limit)
+      : [];
   }
 
-  /**
-   * @private
-   * @param {string[]} unknown
-   * @param {number} budget
-   * @param {boolean} poolOnly
-   * @param {number} minLen
-   */
+  /** @private @param {string[]} unknown @param {number} budget @param {boolean} poolOnly @param {number} minLen */
   _scoreTrigrams(unknown, budget, poolOnly, minLen) {
-    const visited = new Set();
     const { _scores: scores, _dirty: dirty, items } = this;
-    let remaining = budget;
+    const visited = new Set();
+    const maxRounds = budget;
     let hits = 0;
 
-    outer: for (let round = 0; round < budget; round++) {
+    outer: for (let round = 0; round < maxRounds; round++) {
       for (const word of unknown) {
-        if (remaining <= 0) break outer;
+        if (budget <= 0) break outer;
 
         const pos = trigramPosition(word.length, round);
         if (pos < 0) continue;
@@ -208,7 +202,7 @@ export class QuickMatch {
         const tri = word[pos] + word[pos + 1] + word[pos + 2];
         if (visited.has(tri)) continue;
         visited.add(tri);
-        remaining--;
+        budget--;
 
         const matched = this.trigramIndex.get(tri);
         if (!matched) continue;
@@ -235,38 +229,35 @@ export class QuickMatch {
   }
 
   /**
-   * Rank candidates by prefix match, then score, then length.
    * @private
    * @param {number[]} indices
-   * @param {number|null} minScore - null = no score filtering (exact-match path)
+   * @param {number|null} minScore
    * @param {string[]} qwords
    * @param {Uint8Array} sep
    * @param {number} limit
    */
   _rank(indices, minScore, qwords, sep, limit) {
     const { items, _scores: scores } = this;
-    const results = [];
+    const buckets = [[], [], []]; // ps=0, ps=1, ps=2
 
     for (let i = 0; i < indices.length; i++) {
       const idx = indices[i];
       if (minScore !== null && scores[idx] < minScore) continue;
-      results.push(idx);
+      buckets[prefixScore(items[idx], qwords, sep)].push(idx);
     }
 
-    const pscores = new Uint8Array(items.length);
-    for (let i = 0; i < results.length; i++) {
-      pscores[results[i]] = prefixScore(items[results[i]], qwords, sep);
+    const results = [];
+    for (let ps = 2; ps >= 0 && results.length < limit; ps--) {
+      const bucket = buckets[ps];
+      if (!bucket.length) continue;
+      bucket.sort(
+        (a, b) => scores[b] - scores[a] || items[a].length - items[b].length,
+      );
+      const take = Math.min(bucket.length, limit - results.length);
+      for (let i = 0; i < take; i++) results.push(items[bucket[i]]);
     }
 
-    results.sort(
-      (a, b) =>
-        pscores[b] - pscores[a] ||
-        scores[b] - scores[a] ||
-        items[a].length - items[b].length,
-    );
-
-    if (results.length > limit) results.length = limit;
-    return results.map((i) => items[i]);
+    return results;
   }
 }
 
@@ -324,28 +315,32 @@ function splitWords(text, sep, maxLen) {
  */
 function addToIndex(index, key, value) {
   const arr = index.get(key);
-  if (arr) arr.push(value);
-  else index.set(key, [value]);
-}
-
-/**
- * @param {Map<string, number[]>} index
- * @param {string} word
- * @param {number} idx
- */
-function indexTrigrams(index, word, idx) {
-  if (word.length < 3) return;
-  for (let i = 0; i <= word.length - 3; i++) {
-    const tri = word[i] + word[i + 1] + word[i + 2];
-    const arr = index.get(tri);
-    if (!arr) index.set(tri, [idx]);
-    else if (arr[arr.length - 1] !== idx) arr.push(idx);
+  if (arr) {
+    if (arr[arr.length - 1] !== value) arr.push(value);
+  } else {
+    index.set(key, [value]);
   }
 }
 
 /** @param {number[][]} arrays */
+function union(arrays) {
+  if (arrays.length <= 1) return arrays[0] || [];
+  const seen = new Set();
+  const result = [];
+  for (const arr of arrays) {
+    for (const idx of arr) {
+      if (!seen.has(idx)) {
+        seen.add(idx);
+        result.push(idx);
+      }
+    }
+  }
+  return result;
+}
+
+/** @param {number[][]} arrays @returns {number[]|null} */
 function intersect(arrays) {
-  if (!arrays.length) return [];
+  if (arrays.length <= 1) return arrays[0] || null;
 
   let si = 0;
   for (let i = 1; i < arrays.length; i++) {
@@ -353,13 +348,14 @@ function intersect(arrays) {
   }
 
   const result = arrays[si].slice();
-  for (let i = 0; i < arrays.length && result.length > 0; i++) {
+  for (let i = 0; i < arrays.length; i++) {
     if (i === si) continue;
     let w = 0;
     for (let j = 0; j < result.length; j++) {
       if (bsearch(arrays[i], result[j])) result[w++] = result[j];
     }
     result.length = w;
+    if (!w) return null;
   }
   return result;
 }
@@ -380,12 +376,7 @@ function bsearch(arr, val) {
   return false;
 }
 
-/**
- * 2 = exact match, 1 = prefix match, 0 = no match
- * @param {string} item
- * @param {string[]} qwords
- * @param {Uint8Array} sep
- */
+/** @param {string} item @param {string[]} qwords @param {Uint8Array} sep */
 function prefixScore(item, qwords, sep) {
   let qi = 0,
     pos = 0;
@@ -399,7 +390,7 @@ function prefixScore(item, qwords, sep) {
     while (pos < len && !sep[item.charCodeAt(pos)]) pos++;
 
     const qw = qwords[qi];
-    if (pos - ws !== qw.length) return 0;
+    if (pos - ws < qw.length) return 0;
     for (let j = 0; j < qw.length; j++) {
       if (item.charCodeAt(ws + j) !== qw.charCodeAt(j)) return 0;
     }

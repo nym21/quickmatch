@@ -6,6 +6,11 @@ mod config;
 
 pub use config::*;
 
+/// Instant search over a list of strings.
+///
+/// Supports exact words, prefixes ("dom" → "dominance"), joined words
+/// ("hashrate" → "hash_rate"), and typo tolerance ("suply" → "supply").
+/// Results are ranked: exact matches first, then by specificity.
 pub struct QuickMatch<'a> {
     config: QuickMatchConfig,
     max_word_count: usize,
@@ -16,8 +21,8 @@ pub struct QuickMatch<'a> {
     _phantom: PhantomData<&'a str>,
 }
 
-unsafe impl<'a> Send for QuickMatch<'a> {}
-unsafe impl<'a> Sync for QuickMatch<'a> {}
+unsafe impl Send for QuickMatch<'_> {}
+unsafe impl Sync for QuickMatch<'_> {}
 
 impl<'a> QuickMatch<'a> {
     /// Expect the items to be pre-formatted (lowercase)
@@ -42,10 +47,12 @@ impl<'a> QuickMatch<'a> {
             for word in &item_words {
                 max_word_len = max_word_len.max(word.len());
 
-                word_index
-                    .entry(word.to_string())
-                    .or_default()
-                    .insert(item);
+                for len in 1..=word.len() {
+                    word_index
+                        .entry(word[..len].to_string())
+                        .or_default()
+                        .insert(item);
+                }
 
                 if word.len() >= 3 {
                     let chars = word.chars().collect::<Vec<_>>();
@@ -58,10 +65,15 @@ impl<'a> QuickMatch<'a> {
                 }
             }
 
-            // Index adjacent word pairs as compounds (e.g. "hash"+"rate" → "hashrate")
             for pair in item_words.windows(2) {
                 let compound = format!("{}{}", pair[0], pair[1]);
-                word_index.entry(compound).or_default().insert(item);
+                let from = pair[0].len() + 1;
+                for len in from..=compound.len() {
+                    word_index
+                        .entry(compound[..len].to_string())
+                        .or_default()
+                        .insert(item);
+                }
             }
         }
 
@@ -101,185 +113,204 @@ impl<'a> QuickMatch<'a> {
 
         let separators = config.separators();
 
+        let mut seen = FxHashSet::default();
         let query_words: Vec<&str> = query
             .split(separators)
             .filter(|w| !w.is_empty() && w.len() <= self.max_word_len)
+            .filter(|w| seen.insert(*w))
             .collect();
+        drop(seen);
 
-        let words: FxHashSet<&str> = query_words.iter().copied().collect();
-
-        if words.is_empty() || words.len() > self.max_word_count {
+        if query_words.is_empty() || query_words.len() > self.max_word_count {
             return vec![];
         }
 
         let min_len = query.len().saturating_sub(3);
 
-        let mut pool: Option<FxHashSet<*const str>> = None;
         let mut unknown_words = Vec::new();
+        let mut known_sets: Vec<&FxHashSet<*const str>> = vec![];
 
-        let mut words_to_intersect = vec![];
-        for &word in &words {
+        for &word in &query_words {
             if let Some(items) = self.word_index.get(word) {
-                words_to_intersect.push(items)
+                known_sets.push(items)
             } else if word.len() >= 3 && unknown_words.len() < trigram_budget {
                 unknown_words.push(word.chars().collect::<Vec<_>>())
             }
         }
 
-        if !words_to_intersect.is_empty() {
-            words_to_intersect.sort_unstable_by_key(|set| -(set.len() as i64));
+        let pool = Self::intersect_sets(&known_sets);
 
-            let mut intersect = words_to_intersect.pop().cloned().unwrap();
-
-            for other_set in words_to_intersect.iter().rev() {
-                intersect.retain(|ptr| other_set.contains(ptr));
-                if intersect.is_empty() {
-                    break;
+        // Try typo matching for unknown words
+        if !unknown_words.is_empty() && trigram_budget > 0 {
+            let has_pool = pool.is_some();
+            let mut scores: FxHashMap<*const str, usize> = FxHashMap::default();
+            scores.reserve(256);
+            if let Some(pool) = &pool {
+                for &item in pool {
+                    scores.insert(item, 1);
                 }
             }
 
-            pool = Some(intersect);
-        }
-        let some_pool = pool.is_some();
+            let mut budget = trigram_budget;
+            let mut hit_count: usize = 0;
+            let mut visited: FxHashSet<[char; 3]> = FxHashSet::default();
 
-        if unknown_words.is_empty() || trigram_budget == 0 {
-            let mut results: Vec<_> = pool
-                .unwrap_or_default()
-                .into_iter()
-                .map(|item| {
-                    let s = unsafe { &*item as &str };
-                    (s, prefix_score(s, &query_words, separators))
-                })
-                .collect();
+            'outer: for round in 0..trigram_budget {
+                for chars in &unknown_words {
+                    if budget == 0 {
+                        break 'outer;
+                    }
 
-            let cmp =
-                |a: &(&str, u8), b: &(&str, u8)| b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len()));
+                    let len = chars.len();
+                    let max_pos = len - 3;
 
-            if results.len() > limit {
-                results.select_nth_unstable_by(limit, cmp);
-                results.truncate(limit);
-            }
+                    let pos = if round == 0 {
+                        0
+                    } else if round == 1 && max_pos > 0 {
+                        max_pos
+                    } else if round == 2 && max_pos > 1 {
+                        max_pos / 2
+                    } else if max_pos > 2 {
+                        let mid = max_pos / 2;
+                        let offset = (round - 2) >> 1;
+                        let p = if (round & 1) == 1 {
+                            mid.saturating_sub(offset)
+                        } else {
+                            mid + offset
+                        };
 
-            results.sort_unstable_by(cmp);
-
-            return results.into_iter().map(|(item, _)| item).collect();
-        }
-
-        let mut scores: FxHashMap<*const str, usize> = FxHashMap::default();
-        scores.reserve(256);
-        if let Some(pool) = &pool {
-            for &item in pool {
-                scores.insert(item, 1);
-            }
-        }
-
-        let mut budget = trigram_budget;
-        let mut hit_count: usize = 0;
-        let mut visited: FxHashSet<[char; 3]> = FxHashSet::default();
-
-        'outer: for round in 0..trigram_budget {
-            for chars in &unknown_words {
-                if budget == 0 {
-                    break 'outer;
-                }
-
-                let len = chars.len();
-                let max_pos = len - 3;
-
-                let pos = if round == 0 {
-                    0
-                } else if round == 1 && max_pos > 0 {
-                    max_pos
-                } else if round == 2 && max_pos > 1 {
-                    max_pos / 2
-                } else if max_pos > 2 {
-                    let mid = max_pos / 2;
-                    let offset = (round - 2) >> 1;
-                    let p = if (round & 1) == 1 {
-                        mid.saturating_sub(offset)
+                        if p == 0 || p >= max_pos || p == mid {
+                            continue;
+                        }
+                        p
                     } else {
-                        mid + offset
+                        continue;
                     };
 
-                    if p == 0 || p >= max_pos || p == mid {
+                    let trigram = [chars[pos], chars[pos + 1], chars[pos + 2]];
+
+                    if !visited.insert(trigram) {
                         continue;
                     }
-                    p
-                } else {
-                    continue;
-                };
 
-                let trigram = [chars[pos], chars[pos + 1], chars[pos + 2]];
+                    budget -= 1;
 
-                if !visited.insert(trigram) {
-                    continue;
-                }
+                    let Some(items) = self.trigram_index.get(&trigram) else {
+                        continue;
+                    };
 
-                budget -= 1;
+                    hit_count += 1;
 
-                let Some(items) = self.trigram_index.get(&trigram) else {
-                    continue;
-                };
-
-                hit_count += 1;
-
-                if some_pool {
-                    for &item in items {
-                        if let Some(score) = scores.get_mut(&item) {
-                            *score += 1;
+                    if has_pool {
+                        for &item in items {
+                            if let Some(score) = scores.get_mut(&item) {
+                                *score += 1;
+                            }
                         }
-                    }
-                } else {
-                    for &item in items {
-                        let len = unsafe { &*item }.len();
-                        if len >= min_len {
-                            *scores.entry(item).or_default() += 1;
+                    } else {
+                        for &item in items {
+                            let len = unsafe { &*item }.len();
+                            if len >= min_len {
+                                *scores.entry(item).or_default() += 1;
+                            }
                         }
                     }
                 }
             }
+
+            let min_score = hit_count.div_ceil(2).max(config.min_score());
+            let results = Self::rank(
+                scores
+                    .into_iter()
+                    .filter(|(_, s)| *s >= min_score),
+                &query_words,
+                separators,
+                limit,
+            );
+
+            if !results.is_empty() {
+                return results;
+            }
         }
 
-        let min_score = hit_count.div_ceil(2).max(config.min_score());
-        let mut results: Vec<_> = scores
-            .into_iter()
-            .filter(|(_, s)| *s >= min_score)
-            .map(|(item, score)| {
-                let s = unsafe { &*item as &str };
-                (s, score, prefix_score(s, &query_words, separators))
-            })
-            .collect();
+        // Rank known candidates (intersection, or union as fallback)
+        let candidates = pool.unwrap_or_else(|| Self::union_sets(&known_sets));
+        Self::rank(
+            candidates.into_iter().map(|p| (p, 0)),
+            &query_words,
+            separators,
+            limit,
+        )
+    }
 
-        let cmp = |a: &(&str, usize, u8), b: &(&str, usize, u8)| {
-            b.2.cmp(&a.2)
-                .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.0.len().cmp(&b.0.len()))
-        };
-
-        if results.len() > limit {
-            results.select_nth_unstable_by(limit, cmp);
-            results.truncate(limit);
+    fn intersect_sets(sets: &[&FxHashSet<*const str>]) -> Option<FxHashSet<*const str>> {
+        if sets.is_empty() {
+            return None;
         }
 
-        results.sort_unstable_by(cmp);
+        let mut sorted: Vec<_> = sets.to_vec();
+        sorted.sort_unstable_by_key(|s| s.len());
+
+        let mut result = (*sorted[0]).clone();
+
+        for set in &sorted[1..] {
+            result.retain(|ptr| set.contains(ptr));
+            if result.is_empty() {
+                return None;
+            }
+        }
+
+        Some(result)
+    }
+
+    fn union_sets(sets: &[&FxHashSet<*const str>]) -> FxHashSet<*const str> {
+        let mut result = FxHashSet::default();
+        for set in sets {
+            result.extend(set.iter());
+        }
+        result
+    }
+
+    /// Bucket by prefix score, sort only needed buckets by score then length.
+    fn rank(
+        candidates: impl IntoIterator<Item = (*const str, usize)>,
+        query_words: &[&str],
+        separators: &[char],
+        limit: usize,
+    ) -> Vec<&'a str> {
+        let mut buckets: [Vec<(&str, usize)>; 3] = [vec![], vec![], vec![]];
+
+        for (item, score) in candidates {
+            let s = unsafe { &*item as &'a str };
+            let ps = prefix_score(s, query_words, separators);
+            buckets[ps as usize].push((s, score));
+        }
+
+        let mut results = Vec::with_capacity(limit);
+        for ps in (0..3).rev() {
+            let bucket = &mut buckets[ps];
+            if bucket.is_empty() {
+                continue;
+            }
+            bucket.sort_unstable_by(|a, b| {
+                b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len()))
+            });
+            let take = (limit - results.len()).min(bucket.len());
+            results.extend(bucket[..take].iter().map(|(s, _)| *s));
+            if results.len() >= limit {
+                break;
+            }
+        }
 
         results
-            .into_iter()
-            .take(limit)
-            .map(|(item, _, _)| item)
-            .collect()
     }
 }
 
-/// Score how well an item's word sequence matches the query as a prefix.
-/// - 2: exact match (all words match, no extra words in item)
-/// - 1: prefix match (item starts with query words but has more)
-/// - 0: no prefix match
 fn prefix_score(item: &str, query_words: &[&str], separators: &[char]) -> u8 {
     let mut item_words = item.split(separators).filter(|w| !w.is_empty());
     for &qw in query_words {
         match item_words.next() {
-            Some(iw) if iw == qw => continue,
+            Some(iw) if iw.starts_with(qw) => continue,
             _ => return 0,
         }
     }
