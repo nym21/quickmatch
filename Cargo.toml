@@ -10,4 +10,4 @@ keywords = ["search", "fuzzy", "matching", "trigram", "autocomplete"]
 categories = ["algorithms", "text-processing", "data-structures"]
 
 [dependencies]
-rustc-hash = "2.1.1"
+rustc-hash = "2.1.2"
