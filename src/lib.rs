@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ptr};
+use std::{iter, marker::PhantomData};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -37,11 +37,11 @@ impl<'a> QuickMatch<'a> {
         let mut max_word_len = 0;
         let mut max_query_len = 0;
         let mut max_words = 0;
-        let separators = config.separators();
+        let sep = sep_table(config.separators());
 
         for &item in items {
             max_query_len = max_query_len.max(item.len());
-            let item_words: Vec<&str> = item.split(separators).filter(|w| !w.is_empty()).collect();
+            let item_words: Vec<&str> = words(item, &sep).collect();
             max_words = max_words.max(item_words.len());
 
             for word in &item_words {
@@ -54,19 +54,22 @@ impl<'a> QuickMatch<'a> {
                         .insert(item);
                 }
 
-                if word.len() >= 3 {
-                    let chars = word.chars().collect::<Vec<_>>();
-                    for window in chars.windows(3) {
-                        trigram_index
-                            .entry(unsafe { ptr::read(window.as_ptr() as *const [char; 3]) })
-                            .or_default()
-                            .insert(item);
+                let mut chars = word.chars();
+                if let (Some(mut a), Some(mut b)) = (chars.next(), chars.next()) {
+                    for c in chars {
+                        trigram_index.entry([a, b, c]).or_default().insert(item);
+                        a = b;
+                        b = c;
                     }
                 }
             }
 
             for pair in item_words.windows(2) {
                 let compound = format!("{}{}", pair[0], pair[1]);
+                // A joined-word query ("hashrate") can be longer than any
+                // single word. Capping at the longest index key keeps the
+                // DDoS guard data-bounded while still letting it match.
+                max_word_len = max_word_len.max(compound.len());
                 let from = pair[0].len() + 1;
                 for len in from..=compound.len() {
                     word_index
@@ -96,45 +99,38 @@ impl<'a> QuickMatch<'a> {
         let limit = config.limit();
         let trigram_budget = config.trigram_budget();
 
-        if query.is_empty() {
-            return vec![];
-        }
-
-        let query = query
+        let query: String = query
             .trim()
             .chars()
             .filter(|c| c.is_ascii())
-            .collect::<String>()
-            .to_ascii_lowercase();
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
 
         if query.is_empty() || query.len() > self.max_query_len {
             return vec![];
         }
 
-        let separators = config.separators();
+        let sep = sep_table(config.separators());
 
-        let mut seen = FxHashSet::default();
-        let query_words: Vec<&str> = query
-            .split(separators)
-            .filter(|w| !w.is_empty() && w.len() <= self.max_word_len)
-            .filter(|w| seen.insert(*w))
-            .collect();
-        drop(seen);
+        let mut query_words: Vec<&str> = vec![];
+        for w in words(&query, &sep) {
+            if w.len() <= self.max_word_len && !query_words.contains(&w) {
+                query_words.push(w);
+            }
+        }
 
         if query_words.is_empty() || query_words.len() > self.max_word_count {
             return vec![];
         }
 
-        let min_len = query.len().saturating_sub(3);
-
-        let mut unknown_words = Vec::new();
+        let mut unknown_words: Vec<&str> = vec![];
         let mut known_sets: Vec<&FxHashSet<*const str>> = vec![];
 
         for &word in &query_words {
             if let Some(items) = self.word_index.get(word) {
                 known_sets.push(items)
             } else if word.len() >= 3 && unknown_words.len() < trigram_budget {
-                unknown_words.push(word.chars().collect::<Vec<_>>())
+                unknown_words.push(word)
             }
         }
 
@@ -142,89 +138,14 @@ impl<'a> QuickMatch<'a> {
 
         // Try typo matching for unknown words
         if !unknown_words.is_empty() && trigram_budget > 0 {
-            let has_pool = pool.is_some();
-            let mut scores: FxHashMap<*const str, usize> = FxHashMap::default();
-            scores.reserve(256);
-            if let Some(pool) = &pool {
-                for &item in pool {
-                    scores.insert(item, 1);
-                }
-            }
-
-            let mut budget = trigram_budget;
-            let mut hit_count: usize = 0;
-            let mut visited: FxHashSet<[char; 3]> = FxHashSet::default();
-
-            'outer: for round in 0..trigram_budget {
-                for chars in &unknown_words {
-                    if budget == 0 {
-                        break 'outer;
-                    }
-
-                    let len = chars.len();
-                    let max_pos = len - 3;
-
-                    let pos = if round == 0 {
-                        0
-                    } else if round == 1 && max_pos > 0 {
-                        max_pos
-                    } else if round == 2 && max_pos > 1 {
-                        max_pos / 2
-                    } else if max_pos > 2 {
-                        let mid = max_pos / 2;
-                        let offset = (round - 2) >> 1;
-                        let p = if (round & 1) == 1 {
-                            mid.saturating_sub(offset)
-                        } else {
-                            mid + offset
-                        };
-
-                        if p == 0 || p >= max_pos || p == mid {
-                            continue;
-                        }
-                        p
-                    } else {
-                        continue;
-                    };
-
-                    let trigram = [chars[pos], chars[pos + 1], chars[pos + 2]];
-
-                    if !visited.insert(trigram) {
-                        continue;
-                    }
-
-                    budget -= 1;
-
-                    let Some(items) = self.trigram_index.get(&trigram) else {
-                        continue;
-                    };
-
-                    hit_count += 1;
-
-                    if has_pool {
-                        for &item in items {
-                            if let Some(score) = scores.get_mut(&item) {
-                                *score += 1;
-                            }
-                        }
-                    } else {
-                        for &item in items {
-                            let len = unsafe { &*item }.len();
-                            if len >= min_len {
-                                *scores.entry(item).or_default() += 1;
-                            }
-                        }
-                    }
-                }
-            }
-
+            let min_len = query.len().saturating_sub(3);
+            let (scores, hit_count) =
+                self.score_trigrams(&unknown_words, trigram_budget, pool.as_ref(), min_len);
             let min_score = hit_count.div_ceil(2).max(config.min_score());
             let results = Self::rank(
-                scores
-                    .into_iter()
-                    .filter(|(_, s)| *s >= min_score),
+                scores.into_iter().filter(|(_, s)| *s >= min_score),
                 &query_words,
-                separators,
+                &sep,
                 limit,
             );
 
@@ -238,22 +159,26 @@ impl<'a> QuickMatch<'a> {
         Self::rank(
             candidates.into_iter().map(|p| (p, 0)),
             &query_words,
-            separators,
+            &sep,
             limit,
         )
     }
 
+    /// Intersection of all sets, or `None` when there are no sets or no
+    /// overlap. Clones the smallest set, then narrows it against the rest;
+    /// the clone's own source set is skipped since it would change nothing.
     fn intersect_sets(sets: &[&FxHashSet<*const str>]) -> Option<FxHashSet<*const str>> {
-        if sets.is_empty() {
-            return None;
-        }
+        let (smallest_idx, smallest) = sets
+            .iter()
+            .copied()
+            .enumerate()
+            .min_by_key(|(_, s)| s.len())?;
+        let mut result = smallest.clone();
 
-        let mut sorted: Vec<_> = sets.to_vec();
-        sorted.sort_unstable_by_key(|s| s.len());
-
-        let mut result = (*sorted[0]).clone();
-
-        for set in &sorted[1..] {
+        for (i, set) in sets.iter().enumerate() {
+            if i == smallest_idx {
+                continue;
+            }
             result.retain(|ptr| set.contains(ptr));
             if result.is_empty() {
                 return None;
@@ -263,40 +188,39 @@ impl<'a> QuickMatch<'a> {
         Some(result)
     }
 
+    /// Union of all sets.
     fn union_sets(sets: &[&FxHashSet<*const str>]) -> FxHashSet<*const str> {
-        let mut result = FxHashSet::default();
-        for set in sets {
-            result.extend(set.iter());
-        }
-        result
+        sets.iter().flat_map(|s| s.iter().copied()).collect()
     }
 
-    /// Bucket by prefix score, sort only needed buckets by score then length.
+    /// Bucket by matched-word count, then sort each needed bucket by fuzzy
+    /// score, match position, and length.
     fn rank(
         candidates: impl IntoIterator<Item = (*const str, usize)>,
         query_words: &[&str],
-        separators: &[char],
+        sep: &[bool; 256],
         limit: usize,
     ) -> Vec<&'a str> {
-        let mut buckets: [Vec<(&str, usize)>; 3] = [vec![], vec![], vec![]];
+        let mut buckets: Vec<Vec<(&str, usize, usize)>> = vec![vec![]; query_words.len() + 1];
 
-        for (item, score) in candidates {
+        for (item, fuzzy) in candidates {
             let s = unsafe { &*item as &'a str };
-            let ps = prefix_score(s, query_words, separators);
-            buckets[ps as usize].push((s, score));
+            let (matched, position) = word_match(s, query_words, sep);
+            buckets[matched].push((s, fuzzy, position));
         }
 
         let mut results = Vec::with_capacity(limit);
-        for ps in (0..3).rev() {
-            let bucket = &mut buckets[ps];
+        for bucket in buckets.iter_mut().rev() {
             if bucket.is_empty() {
                 continue;
             }
             bucket.sort_unstable_by(|a, b| {
-                b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len()))
+                b.1.cmp(&a.1) // fuzzy score, desc
+                    .then(a.2.cmp(&b.2)) // match position, asc
+                    .then(a.0.len().cmp(&b.0.len())) // item length, asc
+                    .then(a.0.cmp(b.0)) // item text, asc (total order)
             });
-            let take = (limit - results.len()).min(bucket.len());
-            results.extend(bucket[..take].iter().map(|(s, _)| *s));
+            results.extend(bucket.iter().take(limit - results.len()).map(|&(s, ..)| s));
             if results.len() >= limit {
                 break;
             }
@@ -304,19 +228,154 @@ impl<'a> QuickMatch<'a> {
 
         results
     }
+
+    /// Builds per-item trigram-overlap scores for the unknown (typo) words.
+    /// With a `pool`, only pooled items can score (each pre-seeded to 1);
+    /// otherwise any item at least `min_len` chars long is eligible. Returns
+    /// the score map and how many probed trigrams were found in the index.
+    fn score_trigrams(
+        &self,
+        unknown_words: &[&str],
+        trigram_budget: usize,
+        pool: Option<&FxHashSet<*const str>>,
+        min_len: usize,
+    ) -> (FxHashMap<*const str, usize>, usize) {
+        let mut scores: FxHashMap<*const str, usize> = FxHashMap::default();
+        scores.reserve(256);
+        if let Some(pool) = pool {
+            for &item in pool {
+                scores.insert(item, 1);
+            }
+        }
+        let has_pool = pool.is_some();
+
+        let mut budget = trigram_budget;
+        let mut hit_count = 0;
+        let mut visited: FxHashSet<[char; 3]> = FxHashSet::default();
+
+        'outer: for round in 0..trigram_budget {
+            for word in unknown_words {
+                if budget == 0 {
+                    break 'outer;
+                }
+
+                let bytes = word.as_bytes();
+                let Some(pos) = trigram_position(bytes.len(), round) else {
+                    continue;
+                };
+                let trigram = [
+                    bytes[pos] as char,
+                    bytes[pos + 1] as char,
+                    bytes[pos + 2] as char,
+                ];
+
+                if !visited.insert(trigram) {
+                    continue;
+                }
+                budget -= 1;
+
+                let Some(items) = self.trigram_index.get(&trigram) else {
+                    continue;
+                };
+                hit_count += 1;
+
+                if has_pool {
+                    for &item in items {
+                        if let Some(score) = scores.get_mut(&item) {
+                            *score += 1;
+                        }
+                    }
+                } else {
+                    for &item in items {
+                        if unsafe { &*item }.len() >= min_len {
+                            *scores.entry(item).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        (scores, hit_count)
+    }
 }
 
-fn prefix_score(item: &str, query_words: &[&str], separators: &[char]) -> u8 {
-    let mut item_words = item.split(separators).filter(|w| !w.is_empty());
-    for &qw in query_words {
-        match item_words.next() {
-            Some(iw) if iw.starts_with(qw) => continue,
-            _ => return 0,
+/// Builds a byte lookup table from the configured separator chars. Separators
+/// are ASCII, so a byte-indexed table is exact even for multi-byte UTF-8:
+/// continuation and lead bytes are all >= 128 and never flagged.
+fn sep_table(separators: &[char]) -> [bool; 256] {
+    let mut table = [false; 256];
+    for &c in separators {
+        if (c as usize) < 256 {
+            table[c as usize] = true;
         }
     }
-    if item_words.next().is_none() {
-        2
+    table
+}
+
+/// Splits `text` into non-empty words on any separator byte flagged in `sep`.
+fn words<'s>(text: &'s str, sep: &'s [bool; 256]) -> impl Iterator<Item = &'s str> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    iter::from_fn(move || {
+        while i < bytes.len() && sep[bytes[i] as usize] {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && !sep[bytes[i] as usize] {
+            i += 1;
+        }
+        (i > start).then(|| &text[start..i])
+    })
+}
+
+/// Aligns the query words against the item's words, in order:
+/// - `matched`: query words matched as an in-order subsequence of item words
+/// - `position`: index of the item word where that run starts (or the item's
+///   word count when nothing matched)
+fn word_match(item: &str, query_words: &[&str], sep: &[bool; 256]) -> (usize, usize) {
+    let mut matched = 0;
+    let mut position = 0;
+    for iw in words(item, sep) {
+        if query_words
+            .get(matched)
+            .is_some_and(|qw| iw.starts_with(*qw))
+        {
+            matched += 1;
+        } else if matched == 0 {
+            position += 1;
+        }
+    }
+    (matched, position)
+}
+
+/// Picks which trigram of a length-`len` word to probe on `round`, spreading
+/// probes outward from the two ends toward the middle. Returns `None` when the
+/// round offers no fresh position.
+fn trigram_position(len: usize, round: usize) -> Option<usize> {
+    let max = len - 3;
+    if round == 0 {
+        return Some(0);
+    }
+    if round == 1 && max > 0 {
+        return Some(max);
+    }
+    if round == 2 && max > 1 {
+        return Some(max / 2);
+    }
+    if max <= 2 {
+        return None;
+    }
+
+    let mid = max / 2;
+    let offset = (round - 2) >> 1;
+    let pos = if round & 1 == 1 {
+        mid.saturating_sub(offset)
     } else {
-        1
+        mid + offset
+    };
+    if pos == 0 || pos >= max || pos == mid {
+        None
+    } else {
+        Some(pos)
     }
 }
